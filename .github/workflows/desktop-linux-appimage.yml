@@ -1,0 +1,120 @@
+name: Desktop · Linux · x64 AppImage
+
+# Builds an unsigned Linux x64 AppImage from this fork. The artifact version extends
+# the product version with the UTC date and workflow run number so it can never be
+# mistaken for an upstream release.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [linux-appimage]
+    paths:
+      - 'apps/desktop/**'
+      - 'apps/desktop-host/**'
+      - 'packages/**'
+      - 'native/system/**'
+      - 'scripts/**'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/desktop-linux-appimage.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  appimage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      DSH_TELEMETRY_DISABLED: '1'
+      DSH_DESKTOP_TARGET_PLATFORM: linux
+      DSH_DESKTOP_TARGET_ARCH: x64
+      DSH_DESKTOP_UNSIGNED: '1'
+      DSH_DESKTOP_APP_ID: com.deepseek.harness
+      DSH_DESKTOP_MACOS_SKIP_NOTARIZATION: '0'
+    steps:
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.28.5 --activate
+          pnpm --version
+
+      - name: Cache pnpm store and runtime downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/pnpm/store
+            ~/.cache/electron
+            apps/desktop/.desktop-build/downloads
+          key: linux-desktop-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            linux-desktop-${{ runner.os }}-
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build repository artifacts
+        run: pnpm run build --profile local
+
+      - name: Resolve build version
+        run: |
+          product=$(node -p "require('./package.json').version")
+          version="${product}.$(date -u +%Y%m%d).${GITHUB_RUN_NUMBER}"
+          echo "DSH_DESKTOP_BUILD_VERSION=${version}" >> "$GITHUB_ENV"
+          echo "Building ${version} from ${GITHUB_SHA}"
+
+      - name: Pack workspace tarballs
+        run: |
+          pnpm exec tsx apps/desktop/scripts/pack-local-packages.ts \
+            --out apps/desktop/.desktop-build/targets/linux-x64/packed/dsh --concurrency 4
+          pnpm --dir apps/desktop-host pack \
+            --pack-destination apps/desktop/.desktop-build/targets/linux-x64/packed/dsh
+          pnpm run release:pack --family vendor \
+            --out apps/desktop/.desktop-build/targets/linux-x64/packed/vendor --concurrency 4
+          pnpm --dir native/system run build:ts
+          mkdir -p apps/desktop/.desktop-build/targets/linux-x64/packed/landlock
+          pnpm --dir native/system/packages/entry pack \
+            --pack-destination apps/desktop/.desktop-build/targets/linux-x64/packed/landlock
+
+      - name: Prepare Electron, Node, Python, and CLI runtime
+        run: pnpm --dir apps/desktop run prepare:runtime
+
+      - name: Prepare desktop package set
+        run: pnpm --dir apps/desktop run prepare:packages
+
+      - name: Prepare dsh production tree and run its smoke
+        run: pnpm --dir apps/desktop run prepare:dsh
+
+      - name: Build AppImage
+        run: |
+          pnpm --dir apps/desktop exec electron-builder \
+            --config electron-builder.config.mjs --linux --x64 --publish never
+
+      - name: Record artifact
+        run: |
+          cd apps/desktop/.desktop-build/targets/linux-x64/unsigned-artifacts
+          sha256sum ./*.AppImage | tee SHA256SUMS.txt
+          ls -lh ./*.AppImage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dsh-linux-appimage-${{ github.run_number }}
+          path: |
+            apps/desktop/.desktop-build/targets/linux-x64/unsigned-artifacts/*.AppImage
+            apps/desktop/.desktop-build/targets/linux-x64/unsigned-artifacts/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
