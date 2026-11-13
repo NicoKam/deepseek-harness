@@ -85,7 +85,7 @@ export async function uploadDesktopTarget(args: string[]): Promise<void> {
   }
   let fileEnvironment: NodeJS.ProcessEnv
   try {
-    fileEnvironment = loadDesktopPackageEnvironment(desktopTargetPlatform(name).platform)
+    fileEnvironment = loadDesktopPackageEnvironment(desktopTargetPlatform(name).platform as 'darwin' | 'win32')
   } catch (error) {
     throw new DesktopUploadUsageError('Cannot load target dotenv; check the target dotenv file and release settings.')
   }

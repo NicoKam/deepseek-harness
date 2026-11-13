@@ -1,12 +1,12 @@
-import { WINDOWS_TITLEBAR_HEIGHT } from './windows-layout.ts'
+import { OVERLAY_CAPTION, WINDOWS_TITLEBAR_HEIGHT } from './windows-layout.ts'
 /** Synchronizes Windows context menus and caption colors with the application document. */
 import { ipcRenderer } from 'electron'
 import { DESKTOP_IPC } from './ipc.ts'
 import { installWindowsMenu } from './preload-menu.ts'
 
-/** Install the Windows-only titlebar marker and observe application language and palette changes. */
+/** Install the caption marker where the shell draws one, and observe language and palette changes. */
 export function syncWindowsAppearance(): void {
-  if (process.platform !== 'win32') return
+  if (!OVERLAY_CAPTION) return
   const mark = (): void => {
     const root = document.documentElement
     root.dataset.windowsTitlebar = ''
@@ -41,7 +41,7 @@ export function syncWindowsAppearance(): void {
       const current = JSON.stringify(values)
       if (current === previous) return
       previous = current
-      menu.update()
+      menu?.update()
       ipcRenderer.send(DESKTOP_IPC.windowsAppearance, ...values)
     }
     const observer = new MutationObserver(send)
@@ -51,7 +51,7 @@ export function syncWindowsAppearance(): void {
     document.head.addEventListener('load', send, true)
     window.addEventListener('pagehide', () => {
       observer.disconnect()
-      menu.dispose()
+      menu?.dispose()
       probe.remove()
       document.head.removeEventListener('load', send, true)
     }, { once: true })
