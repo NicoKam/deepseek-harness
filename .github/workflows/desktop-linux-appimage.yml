@@ -79,16 +79,16 @@ jobs:
 
       - name: Pack workspace tarballs
         run: |
-          pnpm exec tsx apps/desktop/scripts/pack-local-packages.ts \
-            --out apps/desktop/.desktop-build/targets/linux-x64/packed/dsh --concurrency 4
-          pnpm --dir apps/desktop-host pack \
-            --pack-destination apps/desktop/.desktop-build/targets/linux-x64/packed/dsh
-          pnpm run release:pack --family vendor \
-            --out apps/desktop/.desktop-build/targets/linux-x64/packed/vendor --concurrency 4
+          # pnpm --dir runs inside the package, so every destination stays absolute.
+          packed="$GITHUB_WORKSPACE/apps/desktop/.desktop-build/targets/linux-x64/packed"
+          pnpm exec tsx apps/desktop/scripts/pack-local-packages.ts --out "$packed/dsh" --concurrency 4
+          pnpm --dir apps/desktop-host pack --pack-destination "$packed/dsh"
+          pnpm run release:pack --family vendor --out "$packed/vendor" --concurrency 4
           pnpm --dir native/system run build:ts
-          mkdir -p apps/desktop/.desktop-build/targets/linux-x64/packed/landlock
-          pnpm --dir native/system/packages/entry pack \
-            --pack-destination apps/desktop/.desktop-build/targets/linux-x64/packed/landlock
+          mkdir -p "$packed/landlock"
+          pnpm --dir native/system/packages/entry pack --pack-destination "$packed/landlock"
+          ls "$packed/dsh" | wc -l
+          ls "$packed/vendor" "$packed/landlock"
 
       - name: Prepare Electron, Node, Python, and CLI runtime
         run: pnpm --dir apps/desktop run prepare:runtime
