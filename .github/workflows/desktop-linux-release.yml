@@ -1,0 +1,198 @@
+name: Desktop · Linux release (follow upstream tags)
+
+# Builds an unsigned Linux x64 AppImage for every upstream dsh-v* tag and publishes it
+# as a fork release. The application identity stays the official one: the client is
+# built with the `official` profile (title "DeepSeek Harness", official brand mark),
+# and the artifact keeps the upstream version so it can be matched to that release.
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Upstream tag to build (dsh-v*); empty builds the newest one'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-linux-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      DSH_TELEMETRY_DISABLED: '1'
+      DSH_DESKTOP_TARGET_PLATFORM: linux
+      DSH_DESKTOP_TARGET_ARCH: x64
+      DSH_DESKTOP_UNSIGNED: '1'
+      DSH_DESKTOP_APP_ID: com.deepseek.harness
+      DSH_DESKTOP_MACOS_SKIP_NOTARIZATION: '0'
+    steps:
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+
+      - uses: actions/checkout@v4
+
+      - name: Resolve upstream tag
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          tag="$REQUESTED_TAG"
+          if [ -z "$tag" ]; then
+            tag=$(git ls-remote --tags --refs https://github.com/deepseek-ai/deepseek-harness.git 'dsh-v*' \
+              | awk '{print $2}' | sed 's#refs/tags/##' | sort -V | tail -n 1)
+          fi
+          case "$tag" in
+            dsh-v*) ;;
+            *) echo "::error::Expected an upstream dsh-v* tag, got '$tag'"; exit 1 ;;
+          esac
+          version="${tag#dsh-v}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          if gh release view "linux-desktop-v${version}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::notice::linux-desktop-v${version} already exists; nothing to build"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Building ${tag} (${version})"
+
+      - name: Apply Linux desktop patch to the upstream tag
+        if: steps.resolve.outputs.build == 'true'
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          cp .github/linux-desktop/linux-desktop.patch /tmp/linux-desktop.patch
+          git fetch --depth 1 https://github.com/deepseek-ai/deepseek-harness.git "refs/tags/${TAG}"
+          git checkout -B "linux-desktop-v${VERSION}" FETCH_HEAD
+          git apply --verbose /tmp/linux-desktop.patch
+          git config user.name 'dsh-linux-builder'
+          git config user.email 'dsh-linux-builder@users.noreply.github.com'
+          git add -A
+          git commit -m "build(desktop): Linux x64 packaging for ${TAG}"
+          git tag "linux-desktop-v${VERSION}"
+
+      - uses: actions/setup-node@v4
+        if: steps.resolve.outputs.build == 'true'
+        with:
+          node-version: '24'
+
+      - name: Enable pnpm
+        if: steps.resolve.outputs.build == 'true'
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.28.5 --activate
+          pnpm --version
+
+      - name: Cache pnpm store and runtime downloads
+        if: steps.resolve.outputs.build == 'true'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/pnpm/store
+            ~/.cache/electron
+            apps/desktop/.desktop-build/downloads
+          key: linux-release-${{ runner.os }}-${{ steps.resolve.outputs.version }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            linux-release-${{ runner.os }}-
+
+      - name: Install locked dependencies
+        if: steps.resolve.outputs.build == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Build official-profile artifacts
+        if: steps.resolve.outputs.build == 'true'
+        run: pnpm run build:official
+
+      - name: Pack workspace tarballs
+        if: steps.resolve.outputs.build == 'true'
+        run: |
+          set -euo pipefail
+          # pnpm --dir runs inside the package, so every destination stays absolute.
+          packed="$GITHUB_WORKSPACE/apps/desktop/.desktop-build/targets/linux-x64/packed"
+          pnpm run release:pack --family dsh --out "$packed/dsh" --concurrency 4
+          pnpm --dir apps/desktop-host pack --pack-destination "$packed/dsh"
+          pnpm run release:pack --family vendor --out "$packed/vendor" --concurrency 4
+          pnpm --dir native/system run build:ts
+          mkdir -p "$packed/landlock"
+          pnpm --dir native/system/packages/entry pack --pack-destination "$packed/landlock"
+
+      - name: Prepare Electron, Node, Python, and CLI runtime
+        if: steps.resolve.outputs.build == 'true'
+        run: pnpm --dir apps/desktop run prepare:runtime
+
+      - name: Prepare desktop package set
+        if: steps.resolve.outputs.build == 'true'
+        run: pnpm --dir apps/desktop run prepare:packages
+
+      - name: Prepare dsh production tree and run its smoke
+        if: steps.resolve.outputs.build == 'true'
+        run: pnpm --dir apps/desktop run prepare:dsh
+
+      - name: Build AppImage
+        if: steps.resolve.outputs.build == 'true'
+        run: |
+          pnpm --dir apps/desktop exec electron-builder \
+            --config electron-builder.config.mjs --linux --x64 --publish never
+
+      - name: Record artifact
+        if: steps.resolve.outputs.build == 'true'
+        run: |
+          cd apps/desktop/.desktop-build/targets/linux-x64/unsigned-artifacts
+          sha256sum ./*.AppImage | tee SHA256SUMS.txt
+          ls -lh ./*.AppImage
+
+      - name: Push the versioned tag
+        if: steps.resolve.outputs.build == 'true'
+        env:
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: git push origin "refs/tags/linux-desktop-v${VERSION}"
+
+      - name: Publish the release
+        if: steps.resolve.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          artifacts=apps/desktop/.desktop-build/targets/linux-x64/unsigned-artifacts
+          cat > /tmp/notes.md <<EOF
+          Unsigned Linux x64 AppImage built from upstream \`${TAG}\` plus the Linux desktop
+          packaging patch shipped in this repository (\`.github/linux-desktop/linux-desktop.patch\`).
+
+          - The client is built with the official profile; the product name and brand are unchanged.
+          - Linux upstream support: the Host runs on the bundled Node 24 so native modules such as
+            \`sharp\` share its C++ runtime, and the main window uses the Chromium window-controls
+            overlay for a custom title bar with the in-window Application/Edit menus.
+          - No Apple or Windows signing applies; Linux packages are not signed.
+          - This is an unofficial build, not a DeepSeek release.
+          EOF
+          gh release create "linux-desktop-v${VERSION}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "DeepSeek Harness ${VERSION} · Linux x64 (unofficial)" \
+            --notes-file /tmp/notes.md \
+            "$artifacts"/*.AppImage "$artifacts"/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        if: steps.resolve.outputs.build == 'true'
+        with:
+          name: dsh-linux-release-${{ steps.resolve.outputs.version }}
+          path: |
+            apps/desktop/.desktop-build/targets/linux-x64/unsigned-artifacts/*.AppImage
+            apps/desktop/.desktop-build/targets/linux-x64/unsigned-artifacts/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
