@@ -68,7 +68,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build repository artifacts
-        run: pnpm run build --profile local
+        run: pnpm run build:official
 
       - name: Resolve build version
         run: |
@@ -81,7 +81,7 @@ jobs:
         run: |
           # pnpm --dir runs inside the package, so every destination stays absolute.
           packed="$GITHUB_WORKSPACE/apps/desktop/.desktop-build/targets/linux-x64/packed"
-          pnpm exec tsx apps/desktop/scripts/pack-local-packages.ts --out "$packed/dsh" --concurrency 4
+          pnpm run release:pack --family dsh --out "$packed/dsh" --concurrency 4
           pnpm --dir apps/desktop-host pack --pack-destination "$packed/dsh"
           pnpm run release:pack --family vendor --out "$packed/vendor" --concurrency 4
           pnpm --dir native/system run build:ts
