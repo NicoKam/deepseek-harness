@@ -72,18 +72,21 @@ jobs:
         if: steps.resolve.outputs.build == 'true'
         env:
           TAG: ${{ steps.resolve.outputs.tag }}
-          VERSION: ${{ steps.resolve.outputs.version }}
         run: |
           set -euo pipefail
           cp .github/linux-desktop/linux-desktop.patch /tmp/linux-desktop.patch
           git fetch --depth 1 https://github.com/deepseek-ai/deepseek-harness.git "refs/tags/${TAG}"
-          git checkout -B "linux-desktop-v${VERSION}" FETCH_HEAD
+          git checkout -B linux-desktop-build FETCH_HEAD
           git apply --verbose /tmp/linux-desktop.patch
-          git config user.name 'dsh-linux-builder'
-          git config user.email 'dsh-linux-builder@users.noreply.github.com'
-          git add -A
-          git commit -m "build(desktop): Linux x64 packaging for ${TAG}"
-          git tag "linux-desktop-v${VERSION}"
+          # The GitHub App token cannot push a commit that carries workflow files, so the release
+          # records the upstream tag and both commits instead of tagging a synthetic commit.
+          {
+            echo "upstream_tag: ${TAG}"
+            echo "upstream_commit: $(git rev-parse FETCH_HEAD)"
+            echo "linux_patch_sha256: $(sha256sum /tmp/linux-desktop.patch | cut -d' ' -f1)"
+            echo "workflow_commit: ${GITHUB_SHA}"
+            echo "built_at: $(date -u +%FT%TZ)"
+          } > "$RUNNER_TEMP/BUILD-INFO.txt"
 
       - uses: actions/setup-node@v4
         if: steps.resolve.outputs.build == 'true'
@@ -155,12 +158,6 @@ jobs:
           sha256sum ./*.AppImage | tee SHA256SUMS.txt
           ls -lh ./*.AppImage
 
-      - name: Push the versioned tag
-        if: steps.resolve.outputs.build == 'true'
-        env:
-          VERSION: ${{ steps.resolve.outputs.version }}
-        run: git push origin "refs/tags/linux-desktop-v${VERSION}"
-
       - name: Publish the release
         if: steps.resolve.outputs.build == 'true'
         env:
@@ -183,9 +180,10 @@ jobs:
           EOF
           gh release create "linux-desktop-v${VERSION}" \
             --repo "$GITHUB_REPOSITORY" \
+            --target linux-appimage \
             --title "DeepSeek Harness ${VERSION} · Linux x64 (unofficial)" \
             --notes-file /tmp/notes.md \
-            "$artifacts"/*.AppImage "$artifacts"/SHA256SUMS.txt
+            "$artifacts"/*.AppImage "$artifacts"/SHA256SUMS.txt "$RUNNER_TEMP/BUILD-INFO.txt"
 
       - uses: actions/upload-artifact@v4
         if: steps.resolve.outputs.build == 'true'
@@ -194,5 +192,6 @@ jobs:
           path: |
             apps/desktop/.desktop-build/targets/linux-x64/unsigned-artifacts/*.AppImage
             apps/desktop/.desktop-build/targets/linux-x64/unsigned-artifacts/SHA256SUMS.txt
+            ${{ runner.temp }}/BUILD-INFO.txt
           if-no-files-found: error
           retention-days: 14
