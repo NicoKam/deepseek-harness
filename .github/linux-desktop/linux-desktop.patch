@@ -1,0 +1,427 @@
+diff --git a/apps/desktop/scripts/desktop-build-paths.d.mts b/apps/desktop/scripts/desktop-build-paths.d.mts
+index aaf7159d..de5bedae 100644
+--- a/apps/desktop/scripts/desktop-build-paths.d.mts
++++ b/apps/desktop/scripts/desktop-build-paths.d.mts
+@@ -46,7 +46,7 @@ export function desktopTargetBuildPaths(target: DesktopAutoUpdateTarget, environ
+  * @returns Platform and architecture of the prepared payload.
+  */
+ export function desktopTargetPlatform(target: DesktopAutoUpdateTarget): {
+-  readonly platform: 'darwin' | 'win32'
++  readonly platform: 'darwin' | 'win32' | 'linux'
+   readonly arch: 'arm64' | 'x64'
+ }
+ 
+diff --git a/apps/desktop/scripts/desktop-build-paths.mjs b/apps/desktop/scripts/desktop-build-paths.mjs
+index edfd9cdf..86077edc 100644
+--- a/apps/desktop/scripts/desktop-build-paths.mjs
++++ b/apps/desktop/scripts/desktop-build-paths.mjs
+@@ -4,14 +4,14 @@ import { isAbsolute, join, resolve } from 'node:path'
+ 
+ const APP_ROOT = resolve(import.meta.dirname, '..')
+ const BUILD_ROOT = join(APP_ROOT, '.desktop-build')
+-const SUPPORTED_TARGETS = new Set(['mac-arm64', 'mac-x64', 'win-x64'])
++const SUPPORTED_TARGETS = new Set(['mac-arm64', 'mac-x64', 'win-x64', 'linux-x64'])
+ 
+ /**
+  * Resolve the fixed build target selected by a packaging environment.
+  * @param {NodeJS.ProcessEnv} env - Packaging environment.
+  * @param {NodeJS.Platform} hostPlatform - Build-host platform used when no target override exists.
+  * @param {string} hostArch - Build-host architecture used when no target override exists.
+- * @returns {'mac-arm64' | 'mac-x64' | 'win-x64'} Supported Desktop target name.
++ * @returns {'mac-arm64' | 'mac-x64' | 'win-x64' | 'linux-x64'} Supported Desktop target name.
+  */
+ export function resolveDesktopBuildTarget(
+   env = process.env,
+@@ -26,7 +26,7 @@ export function resolveDesktopBuildTarget(
+   if (!SUPPORTED_TARGETS.has(target)) {
+     throw new Error(`desktop build paths: unsupported target ${target}`)
+   }
+-  return /** @type {'mac-arm64' | 'mac-x64' | 'win-x64'} */ (target)
++  return /** @type {'mac-arm64' | 'mac-x64' | 'win-x64' | 'linux-x64'} */ (target)
+ }
+ 
+ function assertSupportedTarget(target) {
+@@ -37,7 +37,7 @@ function assertSupportedTarget(target) {
+ 
+ /**
+  * Return the mutable preparation and artifact directories owned by one release target.
+- * @param {'mac-arm64' | 'mac-x64' | 'win-x64'} target - Supported Desktop target name.
++ * @param {'mac-arm64' | 'mac-x64' | 'win-x64' | 'linux-x64'} target - Supported Desktop target name.
+  * @param {NodeJS.ProcessEnv} environment - Packaging environment with an optional absolute cache directory.
+  * @returns {{ root: string, artifacts: string, unsignedArtifacts: string, unnotarizedArtifacts: string, runtime: string, packageSet: string, dsh: string, dshPnpm: string, electron: string, packedDsh: string, packedVendor: string, packedLandlock: string, downloads: string, pnpmStore: string }} Target paths plus shared download and package caches.
+  */
+@@ -70,8 +70,8 @@ export function desktopTargetBuildPaths(target, environment = process.env) {
+ /**
+  * Return the platform and architecture of the payload one release target prepares.
+  * Windows is prepared as x64 only, so this differs from the build host on an arm64 Windows machine.
+- * @param {'mac-arm64' | 'mac-x64' | 'win-x64'} target - Supported Desktop target name.
+- * @returns {{ platform: 'darwin' | 'win32', arch: 'arm64' | 'x64' }} Platform and architecture of the prepared payload.
++ * @param {'mac-arm64' | 'mac-x64' | 'win-x64' | 'linux-x64'} target - Supported Desktop target name.
++ * @returns {{ platform: 'darwin' | 'win32' | 'linux', arch: 'arm64' | 'x64' }} Platform and architecture of the prepared payload.
+  */
+ export function desktopTargetPlatform(target) {
+   assertSupportedTarget(target)
+@@ -79,6 +79,7 @@ export function desktopTargetPlatform(target) {
+     'mac-arm64': { platform: 'darwin', arch: 'arm64' },
+     'mac-x64': { platform: 'darwin', arch: 'x64' },
+     'win-x64': { platform: 'win32', arch: 'x64' },
++    'linux-x64': { platform: 'linux', arch: 'x64' },
+   })
+   return targets[target]
+ }
+diff --git a/apps/desktop/scripts/electron-builder-config.mjs b/apps/desktop/scripts/electron-builder-config.mjs
+index a777a058..441fbfb2 100644
+--- a/apps/desktop/scripts/electron-builder-config.mjs
++++ b/apps/desktop/scripts/electron-builder-config.mjs
+@@ -66,7 +66,7 @@ export function createElectronBuilderConfig(
+   if (skipNotarization && (unsigned || resolvedPlatform !== 'darwin')) throw new Error('Skipping notarization requires a signed macOS build')
+   const packagesMacOS = targetPlatform === 'darwin' || (targetPlatform === undefined && hostPlatform === 'darwin')
+   const packagesWindows = resolvedPlatform === 'win32'
+-  const policy = packagesMacOS && unsigned ? undefined : resolveDesktopPolicyEnvironment(env)
++  const policy = unsigned && (packagesMacOS || resolvedPlatform === 'linux') ? undefined : resolveDesktopPolicyEnvironment(env)
+   if (resolvedPlatform === 'win32') installWindowsDirectoryInstaller()
+   const macOSSigning = packagesMacOS && !unsigned ? resolveMacOSSigningEnvironment(env) : undefined
+   if (packagesMacOS && !unsigned && !skipNotarization) resolveMacOSNotarizationEnvironment(env)
+@@ -122,7 +122,8 @@ export function createElectronBuilderConfig(
+     // Unsigned builds carry their own suffix so a shared file can never pass for a release artifact.
+     artifactName: `deepseek-harness-\${version}-\${os}-\${arch}${output.suffix}.\${ext}`,
+     directories: { output: output.directory },
+-    asar: true,
++    // Linux Host runs on the bundled Node, which cannot read ASAR, so its application directory stays unpacked.
++    asar: resolvedPlatform !== 'linux',
+     electronDist: buildPaths.electron,
+     electronFuses: { runAsNode: true },
+     beforeBuild: async () => {
+@@ -255,7 +256,9 @@ export function createElectronBuilderConfig(
+       target: ['nsis'],
+     },
+     linux: {
++      icon: fileURLToPath(new URL('../resources/icon-windows.png', import.meta.url)),
+       category: 'Development',
++      executableName: 'deepseek-harness',
+       target: ['AppImage'],
+     },
+     nsis: {
+diff --git a/apps/desktop/scripts/prepare-cli.ts b/apps/desktop/scripts/prepare-cli.ts
+index d2b9e142..588aadd4 100644
+--- a/apps/desktop/scripts/prepare-cli.ts
++++ b/apps/desktop/scripts/prepare-cli.ts
+@@ -1,17 +1,36 @@
+ /** Package terminal launch scripts that reuse the installed Electron runtime. */
+ 
+-import { chmodSync, copyFileSync, mkdirSync } from 'node:fs'
++import { chmodSync, copyFileSync, mkdirSync, writeFileSync } from 'node:fs'
+ import { join } from 'node:path'
+ 
++/** Linux launcher: the Host runs on the bundled Node and its dsh tree sits outside app.asar. */
++const LINUX_LAUNCHER = `#!/bin/sh
++# Run the installed CLI without changing the invoking shell or working directory.
++set -e
++launcher=$0
++while [ -L "$launcher" ]; do
++  directory=$(CDPATH= cd -- "$(dirname -- "$launcher")" && pwd -P)
++  target=$(readlink "$launcher")
++  case "$target" in
++    /*) launcher=$target ;;
++    *) launcher=$directory/$target ;;
++  esac
++done
++resources=$(CDPATH= cd -- "$(dirname -- "$launcher")/../../.." && pwd -P)
++exec "$resources/runtime/primary-runtime/dependencies/node/bin/node" --expose-internals \
++  "$resources/app/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js" "$@"
++`
++
+ /**
+  * Copy the platform launcher into the application's public command directory.
+  * @param destination - Physical runtime/cli directory prepared for the application.
+  * @param platform - Target Desktop operating system.
+  */
+-export function prepareDesktopCli(destination: string, platform: 'darwin' | 'win32'): void {
++export function prepareDesktopCli(destination: string, platform: string): void {
+   const name = platform === 'win32' ? 'dsh.cmd' : 'dsh'
+   const command = join(destination, 'bin', name)
+   mkdirSync(join(destination, 'bin'), { recursive: true })
+-  copyFileSync(join(import.meta.dirname, '..', 'cli', name), command)
+-  if (platform === 'darwin') chmodSync(command, 0o755)
++  if (platform === 'linux') writeFileSync(command, LINUX_LAUNCHER, { mode: 0o755 })
++  else copyFileSync(join(import.meta.dirname, '..', 'cli', name), command)
++  if (platform !== 'win32') chmodSync(command, 0o755)
+ }
+diff --git a/apps/desktop/scripts/prepare-dsh.ts b/apps/desktop/scripts/prepare-dsh.ts
+index a0698880..7c3ec189 100644
+--- a/apps/desktop/scripts/prepare-dsh.ts
++++ b/apps/desktop/scripts/prepare-dsh.ts
+@@ -44,7 +44,11 @@ const STORE_ROOT = BUILD_PATHS.pnpmStore
+ const RUNTIME_ROOT = BUILD_PATHS.runtime
+ const PNPM_BUILD_STATE = BUILD_PATHS.dshPnpm
+ const PACKAGE_SET_ROOT = BUILD_PATHS.packageSet
+-const NODE = join(BUILD_PATHS.electron, process.platform === 'win32' ? 'electron.exe' : 'Electron.app/Contents/MacOS/Electron')
++// Linux runs the Host under the bundled Node, whose C++ runtime matches the shipped native modules;
++// Electron-as-node keeps the other targets because their payloads are built against it.
++const NODE = process.platform === 'linux'
++  ? join(RUNTIME_ROOT, 'primary-runtime', 'dependencies', 'node', 'bin', 'node')
++  : join(BUILD_PATHS.electron, process.platform === 'win32' ? 'electron.exe' : 'Electron.app/Contents/MacOS/Electron')
+ const PNPM = join(RUNTIME_ROOT, 'primary-runtime', 'dependencies', 'pnpm', 'bin', 'pnpm.mjs')
+ 
+ function manifestVersion(path: string, subject: string): string {
+diff --git a/apps/desktop/scripts/prepare-runtime.ts b/apps/desktop/scripts/prepare-runtime.ts
+index 4e338532..2aae1a94 100644
+--- a/apps/desktop/scripts/prepare-runtime.ts
++++ b/apps/desktop/scripts/prepare-runtime.ts
+@@ -17,23 +17,22 @@ import { prepareCommandLink } from './prepare-command-link.ts'
+ const BUILD_PATHS = resolveDesktopTargetBuildPaths()
+ const RUNTIME_ROOT = BUILD_PATHS.runtime
+ 
+-type DesktopTarget = ReturnType<typeof desktopTargetPlatform>
+ 
+ /** Extract the target Electron distribution and return its embedded Node version. */
+-async function prepareElectron({ platform, arch }: DesktopTarget): Promise<string> {
++async function prepareElectron({ platform, arch }: { platform: string, arch: string }): Promise<string> {
+   const require = createRequire(import.meta.url)
+   const { version } = require('electron/package.json') as { version: string }
+   const archive = await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'download:electron',
+     () => downloadArtifact({ version, platform, arch, artifactName: 'electron', cacheRoot: BUILD_PATHS.downloads }))
+   rmSync(BUILD_PATHS.electron, { recursive: true, force: true })
+   await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'extract:electron', () => extractZip(archive, { dir: BUILD_PATHS.electron }))
+-  const executable = join(BUILD_PATHS.electron, platform === 'win32' ? 'electron.exe' : 'Electron.app/Contents/MacOS/Electron')
++  const executable = join(BUILD_PATHS.electron, platform === 'win32' ? 'electron.exe' : platform === 'linux' ? 'electron' : 'Electron.app/Contents/MacOS/Electron')
+   return execFileSync(executable, ['-p', 'process.versions.node'], {
+     encoding: 'utf8', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+   }).trim()
+ }
+ 
+-function prepareCli({ platform, arch }: DesktopTarget): void {
++function prepareCli({ platform, arch }: { platform: string, arch: 'arm64' | 'x64' }): void {
+   cpSync(join(import.meta.dirname, 'node-bin'), join(RUNTIME_ROOT, 'bin'), { recursive: true })
+   chmodSync(join(RUNTIME_ROOT, 'bin', 'node'), 0o755)
+   const cli = join(RUNTIME_ROOT, 'cli')
+@@ -51,23 +50,26 @@ function prepareCli({ platform, arch }: DesktopTarget): void {
+ async function main(): Promise<void> {
+   const { values } = parseArgs({ options: { 'defer-primary-runtime-smoke': { type: 'boolean', default: false } } })
+   const target = desktopTargetPlatform(resolveDesktopBuildTarget())
++  // The requested target platform may be Linux, which the publisher-facing union does not enumerate.
++  const targetPlatform: string = process.env.DSH_DESKTOP_TARGET_PLATFORM ?? target.platform
++  const payload = { platform: targetPlatform, arch: target.arch }
+   rmSync(RUNTIME_ROOT, { recursive: true, force: true })
+   mkdirSync(RUNTIME_ROOT, { recursive: true })
+   const preparePrimary = () => packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'prepare:primary-runtime',
+     () => preparePrimaryRuntime({ deferSmoke: values['defer-primary-runtime-smoke'] }))
+   let nodeVersion: string
+   if (target.platform === 'win32') {
+-    const [electron, primary] = await Promise.allSettled([prepareElectron(target), preparePrimary()])
++    const [electron, primary] = await Promise.allSettled([prepareElectron(payload), preparePrimary()])
+     if (electron.status === 'rejected') throw electron.reason
+     if (primary.status === 'rejected') throw primary.reason
+     nodeVersion = electron.value
+   } else {
+-    nodeVersion = await prepareElectron(target)
++    nodeVersion = await prepareElectron(payload)
+     await preparePrimary()
+   }
+   const { pnpm } = await readPrimaryRuntime(join(RUNTIME_ROOT, 'primary-runtime'))
+   if (pnpm === undefined) throw new Error('desktop runtime: primary-runtime manifest has no pnpm version')
+-  await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'prepare:cli', async () => { prepareCli(target) })
++  await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'prepare:cli', async () => { prepareCli(payload) })
+   writeFileSync(join(RUNTIME_ROOT, 'versions.json'), `${JSON.stringify({
+     schemaVersion: 1,
+     node: nodeVersion,
+diff --git a/apps/desktop/scripts/upload-target.ts b/apps/desktop/scripts/upload-target.ts
+index 831d8096..71b4ce27 100644
+--- a/apps/desktop/scripts/upload-target.ts
++++ b/apps/desktop/scripts/upload-target.ts
+@@ -85,7 +85,7 @@ export async function uploadDesktopTarget(args: string[]): Promise<void> {
+   }
+   let fileEnvironment: NodeJS.ProcessEnv
+   try {
+-    fileEnvironment = loadDesktopPackageEnvironment(desktopTargetPlatform(name).platform)
++    fileEnvironment = loadDesktopPackageEnvironment(desktopTargetPlatform(name).platform as 'darwin' | 'win32')
+   } catch (error) {
+     throw new DesktopUploadUsageError('Cannot load target dotenv; check the target dotenv file and release settings.')
+   }
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+index 92327109..3453ce7b 100644
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -6,7 +6,7 @@ import type { DesktopChannelState, DesktopChannelChangeResult } from '@deepseek-
+ import { DesktopUpdateSettings } from './update-settings.ts'
+ import { isDesktopUpdateChannel } from './settings-file.ts'
+ import type { ProductEventMap, ProductEvent } from '@deepseek-ai/dsh-client-product-analytics/types'
+-import { WINDOWS_TITLEBAR_HEIGHT } from './windows-layout.ts'
++import { OVERLAY_CAPTION, WINDOWS_TITLEBAR_HEIGHT } from './windows-layout.ts'
+ import { access, readFile, writeFile } from 'node:fs/promises'
+ import { join } from 'node:path'
+ import { fileURLToPath } from 'node:url'
+@@ -207,7 +207,11 @@ interface RuntimeResources {
+ 
+ function runtimeResources(): RuntimeResources {
+   const development = !app.isPackaged
+-  const node = process.execPath
++  // Linux runs the Host on the bundled Node so native modules link the same C++ runtime; that build also
++  // disables ASAR because a plain Node process cannot read inside the archive.
++  const bundledNode = join(process.resourcesPath, 'runtime', 'primary-runtime', 'dependencies', 'node', 'bin',
++    process.platform === 'win32' ? 'node.exe' : 'node')
++  const node = development ? process.execPath : process.platform === 'linux' ? bundledNode : process.execPath
+   const nodeBin = development ? join(app.getAppPath(), 'scripts', 'node-bin') : join(process.resourcesPath, 'runtime', 'bin')
+   const pnpm = (development ? process.env.DSH_DESKTOP_PNPM_ENTRY : undefined)
+     ?? (development ? join(app.getAppPath(), 'node_modules', 'pnpm', 'bin', 'pnpm.mjs')
+@@ -274,6 +278,14 @@ function createWindow(preload: string, show = false, primary = false): BrowserWi
+       titleBarOverlay: { height: WINDOWS_TITLEBAR_HEIGHT, color: chromeFallbackFill(),
+         symbolColor: nativeTheme.shouldUseDarkColors ? '#f9fafb' : '#0f1115' },
+     } : {}),
++    // Linux hides the native frame the same way Windows does; Chromium then draws the window controls
++    // in the overlay and the client reserves the same 40 px band.
++    ...(process.platform === 'linux' && primary ? {
++      titleBarStyle: 'hidden' as const,
++      backgroundColor: chromeFallbackFill(),
++      titleBarOverlay: { height: WINDOWS_TITLEBAR_HEIGHT, color: chromeFallbackFill(),
++        symbolColor: nativeTheme.shouldUseDarkColors ? '#f9fafb' : '#0f1115' },
++    } : {}),
+     // hiddenInset places traffic lights inside the sidebar; sidebar vibrancy
+     // needs a transparent window background to show through the page.
+     ...(process.platform === 'darwin' ? {
+@@ -1265,7 +1277,7 @@ async function main(): Promise<void> {
+     ...(process.platform === 'win32' ? { icon: nativeImage.createFromPath(trayIconPath) } : {}),
+   })
+ 
+-  if (process.platform === 'win32') {
++  if (OVERLAY_CAPTION) {
+     ipcMain.handle(DESKTOP_IPC.windowsMenu, (event, name: unknown, x: unknown, y: unknown) => {
+       assertDesktopSender(event, ['app'])
+       if (mainWindow === undefined || event.sender !== mainWindow.webContents
+diff --git a/apps/desktop/src/preload-mandatory-overlay.ts b/apps/desktop/src/preload-mandatory-overlay.ts
+index 8fa1c7f3..7f6c55a4 100644
+--- a/apps/desktop/src/preload-mandatory-overlay.ts
++++ b/apps/desktop/src/preload-mandatory-overlay.ts
+@@ -2,7 +2,7 @@
+ import { ipcRenderer } from 'electron'
+ import { MANDATORY_IPC } from './mandatory-update-ipc.ts'
+ import type { MandatoryUpdateView } from './mandatory-update-window.ts'
+-import { WINDOWS_TITLEBAR_HEIGHT } from './windows-layout.ts'
++import { OVERLAY_CAPTION, WINDOWS_TITLEBAR_HEIGHT } from './windows-layout.ts'
+ 
+ /** Keep update actions on a private channel to the shell frame; the shared product DOM is not a tamper-proof display. */
+ export function installMandatoryUpdateOverlay(): void {
+@@ -26,7 +26,8 @@ export function installMandatoryUpdateOverlay(): void {
+     closing = undefined
+     if (frame === undefined) {
+       host = document.createElement('div')
+-      host.style.cssText = `position:fixed;top:${WINDOWS_TITLEBAR_HEIGHT}px;left:0;right:0;bottom:0;z-index:2147483647`
++      const top = OVERLAY_CAPTION ? WINDOWS_TITLEBAR_HEIGHT : 0
++      host.style.cssText = `position:fixed;top:${top}px;left:0;right:0;bottom:0;z-index:2147483647`
+       const shadow = host.attachShadow({ mode: 'closed' })
+       frame = document.createElement('iframe')
+       frame.title = state.locale.messages.mandatoryTitle
+diff --git a/apps/desktop/src/preload-windows.ts b/apps/desktop/src/preload-windows.ts
+index 5b9ed756..b0756969 100644
+--- a/apps/desktop/src/preload-windows.ts
++++ b/apps/desktop/src/preload-windows.ts
+@@ -1,12 +1,12 @@
+-import { WINDOWS_TITLEBAR_HEIGHT } from './windows-layout.ts'
++import { OVERLAY_CAPTION, WINDOWS_TITLEBAR_HEIGHT } from './windows-layout.ts'
+ /** Synchronizes Windows context menus and caption colors with the application document. */
+ import { ipcRenderer } from 'electron'
+ import { DESKTOP_IPC } from './ipc.ts'
+ import { installWindowsMenu } from './preload-menu.ts'
+ 
+-/** Install the Windows-only titlebar marker and observe application language and palette changes. */
++/** Install the caption marker where the shell draws one, and observe language and palette changes. */
+ export function syncWindowsAppearance(): void {
+-  if (process.platform !== 'win32') return
++  if (!OVERLAY_CAPTION) return
+   const mark = (): void => {
+     const root = document.documentElement
+     root.dataset.windowsTitlebar = ''
+@@ -41,7 +41,7 @@ export function syncWindowsAppearance(): void {
+       const current = JSON.stringify(values)
+       if (current === previous) return
+       previous = current
+-      menu.update()
++      menu?.update()
+       ipcRenderer.send(DESKTOP_IPC.windowsAppearance, ...values)
+     }
+     const observer = new MutationObserver(send)
+@@ -51,7 +51,7 @@ export function syncWindowsAppearance(): void {
+     document.head.addEventListener('load', send, true)
+     window.addEventListener('pagehide', () => {
+       observer.disconnect()
+-      menu.dispose()
++      menu?.dispose()
+       probe.remove()
+       document.head.removeEventListener('load', send, true)
+     }, { once: true })
+diff --git a/apps/desktop/src/update-overlay.ts b/apps/desktop/src/update-overlay.ts
+index 0de12469..66f38640 100644
+--- a/apps/desktop/src/update-overlay.ts
++++ b/apps/desktop/src/update-overlay.ts
+@@ -1,7 +1,7 @@
+ /** Isolated update documents share their owner's native window and input lifetime. */
+ import { WebContentsView, type BrowserWindow, type WebContents, type View } from 'electron'
+ import type { EventEmitter } from 'node:events'
+-import { WINDOWS_TITLEBAR_HEIGHT } from './windows-layout.ts'
++import { OVERLAY_CAPTION, WINDOWS_TITLEBAR_HEIGHT } from './windows-layout.ts'
+ 
+ /** Main-owned document with no independent native window or activation state. */
+ export interface DesktopUpdateOverlay {
+@@ -48,7 +48,7 @@ export class DesktopUpdateOverlays {
+     input.active++; input.revision++
+     const resize = (): void => {
+       const { width, height } = parent.getContentBounds()
+-      const top = process.platform === 'win32' ? WINDOWS_TITLEBAR_HEIGHT : 0
++      const top = OVERLAY_CAPTION ? WINDOWS_TITLEBAR_HEIGHT : 0
+       view.setBounds({ x: 0, y: top, width, height: Math.max(0, height - top) })
+     }
+     const focus = (): void => {
+diff --git a/apps/desktop/src/windows-layout.ts b/apps/desktop/src/windows-layout.ts
+index 0ba4ad5c..de2f0478 100644
+--- a/apps/desktop/src/windows-layout.ts
++++ b/apps/desktop/src/windows-layout.ts
+@@ -2,3 +2,6 @@
+ 
+ /** Windows application titlebar height in device-independent pixels. */
+ export const WINDOWS_TITLEBAR_HEIGHT = 40
++
++/** Platforms whose main window draws its caption inside Chromium's window-controls overlay. */
++export const OVERLAY_CAPTION = process.platform === 'win32' || process.platform === 'linux'
+diff --git a/apps/desktop/tests/fixtures/pnpm-smoke.mjs b/apps/desktop/tests/fixtures/pnpm-smoke.mjs
+index 5d16769a..d587ec3b 100644
+--- a/apps/desktop/tests/fixtures/pnpm-smoke.mjs
++++ b/apps/desktop/tests/fixtures/pnpm-smoke.mjs
+@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process'
+ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+ import { rm } from 'node:fs/promises'
+ import { tmpdir } from 'node:os'
+-import { delimiter, join } from 'node:path'
++import { basename, delimiter, join } from 'node:path'
+ 
+ /**
+  * Exercise offline installation and package scripts without a system pnpm or Node installation.
+@@ -13,7 +13,11 @@ import { delimiter, join } from 'node:path'
+  * @returns {Promise<void>} Resolves after execution and removal of the private installation.
+  */
+ export async function checkPnpm(resourcesRuntime) {
+-  assert.ok(process.versions.electron, 'Run the package-manager smoke with Electron Node mode')
++  // Linux Desktop launches the Host on the bundled Node so native modules share its C++ runtime;
++  // the other targets keep Electron Node mode.
++  const bundledNodeLaunch = process.versions.electron === undefined && process.platform === 'linux'
++    && basename(process.execPath) === 'node'
++  assert.ok(process.versions.electron !== undefined || bundledNodeLaunch, 'Run the package-manager smoke with Desktop Node mode')
+   assert.equal(existsSync(join(resourcesRuntime, 'pnpm')), false, 'Desktop must ship only primary-runtime pnpm')
+   const primary = join(resourcesRuntime, 'primary-runtime')
+   const pnpm = join(primary, 'dependencies', 'pnpm', 'bin', 'pnpm.mjs')
+@@ -36,7 +40,8 @@ export async function checkPnpm(resourcesRuntime) {
+ const assert = require('node:assert/strict')
+ assert.equal(require('desktop-pnpm-smoke-dependency').answer, 42)
+ assert.equal(process.execPath, ${JSON.stringify(process.execPath)})
+-assert.ok(process.versions.electron)
++assert.ok(process.versions.electron !== undefined
++  || (process.platform === 'linux' && process.execPath.endsWith('/node')))
+ assert.ok(process.execArgv.includes('--expose-internals'))
+ assert.equal(typeof require('internal/modules/esm/loader').getOrInitializeCascadedLoader, 'function')
+ console.log('desktop-node-script-ok')
+@@ -65,5 +70,5 @@ console.log('desktop-node-script-ok')
+ if (import.meta.main) {
+   assert.ok(process.argv[2], 'Pass the packaged runtime directory')
+   await checkPnpm(process.argv[2])
+-  console.log('desktop pnpm: offline installation and Electron Node package script passed')
++  console.log('desktop pnpm: offline installation and Desktop Node package script passed')
+ }
